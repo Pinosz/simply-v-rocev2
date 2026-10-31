@@ -6,6 +6,8 @@ University internship project by **Domenico Coppola**, integrating a RoCEv2 hard
 
 This repository currently contains the project documentation and hardware evidence. The RTL source package is not included in this upload; [source notes](docs/source-notes.md) describe the inspected files and the version differences to reconcile for a reproducible source release.
 
+The internship integration and hardware traffic demonstration are documented here. Subsequent transmitter experiments remain work in progress and are outside the scope of this repository and its reported results.
+
 The prototype uses an internal payload generator. Hardware testing demonstrates activity at the Ethernet MAC boundary; a complete remote-memory write and sustained application throughput have not been demonstrated.
 
 ## My contribution

@@ -4,6 +4,22 @@
 
 The supplied source folder was inspected read-only while preparing this documentation. The RTL, fetch scripts, build settings, and original notes were not changed. Historical hardware observations are taken from the project notes and attached figures; this inspection is not a new FPGA build or hardware validation.
 
+## Project scope and version history
+
+The internship integration and hardware traffic demonstration are the scope of this repository. Subsequent transmitter experiments are unfinished and have not been included in the supplied material or in the reported results.
+
+The file modification dates support treating the root files as the newer modular-integration candidate:
+
+| File or document | Recorded modification date |
+| --- | --- |
+| Wrapper inside the Simply-V unit directory | 21 May 2026 |
+| Root RoCE stack and network wrapper | 29 May 2026 |
+| Root `custom_top_wrapper.sv` | 30 May 2026 |
+| Integration report | 9 June 2026 |
+| Updated project summary | 11 June 2026 |
+
+The root wrapper's interface also matches the modular migration described in the report. Modification dates help identify a candidate source version; they do not establish which exact files produced a bitstream. The differences listed below have not been attributed to the unfinished follow-up experiments.
+
 ## Code entry points
 
 | Path from the supplied project root | Purpose |
