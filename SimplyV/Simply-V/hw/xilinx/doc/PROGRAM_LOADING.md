@@ -1,0 +1,53 @@
+# Program Loading
+
+Once the target board is programmed with a valid bitstream, a program can be loaded into SoC memory using different methods, depending on the selected RISC-V CPU specified by `CORE_SELECTOR`. Example programs can be compiled and built in the `sw/SoC` directory using `make`. Externally compiled programs can also be used, but ensure they are built with the appropriate compilation flags for the selected CPU.
+
+We offer two loading options:
+- **Binary Loading**: load the flat .bin file starting from a memory address
+- **ELF Loading**: load the ELF file using sections
+
+For both flows, the default application loaded is `sw/SoC/examples/blinky`
+
+## Load an ELF file
+
+To load an ELF file, a backend that supports the target platform and CPU is required. Currently, we support two backends:
+[OpenOCD](../../../sw/doc/OPENOCD_INSTALLATION.md) and XSDB (coming with Vivado).
+
+Both connect to port 3004 for all cores, except for `CORE_MICROBLAZEV_RV64`, which requires port 3005.
+
+For loading, we primarily use GDB, though XSDB is also a viable option for Microblaze-V CPUs.
+
+If `CORE_SELECTOR` is set to `CORE_MICROBLAZEV_RV32`, `CORE_DUAL_MICROBLAZEV_RV32`,  `CORE_MICROBLAZEV_RV64`, the ELF file can be loaded into memory and executed using:
+``` bash
+make xsdb_run
+```
+> NOTE: XSDB might require to reset the processor across runs. In the XSDB shell, use the command `rst -processor`.
+
+Instead, if the `CORE_SELECTOR` is another one (e.g. `CORE_CV32E40P`) use openocd (be sure to have closed connections with Xilinx HW server before)
+``` bash
+make openocd_run
+```
+Once the backend is enabled, load an example ELF file using:
+``` bash
+make gdb_run EXAMPLE=hello_world
+```
+Or explicitly pick your ELF:
+``` bash
+make gdb_run ELF_PATH=<path-to-elf>
+```
+
+## Load a binary file
+
+Since not all CPUs supported by `CORE_SELECTOR` have a backend or dedicated loading infrastructure (e.g. `CORE_PICORV32`), memory can also be programmed with a flat binary using _Xilinx jtag2axi_ or _Xilinx DMA_ IPs, both integrated into our `rtl/sys_master` component. This binary loading process is straightforward, as it directly writes bytes into memory.
+
+> NOTE: This loading flow writes a flat binary image, including zero-padding between memory sections. Therefore, during linking, you might need to keep an eye for large binaries.
+
+``` bash
+make load_binary BIN_PATH=<path-to-bin> OFFSET=<value> LOAD_BINARY_READBACK=<false|true>
+```
+Once the binary is loaded, manually trigger a CPU reset with:
+``` bash
+make vio_resetn
+```
+The VIO resetn controls the CPU and debug module reset instead of GDB, allowing the user to directly manage the core reset.
+

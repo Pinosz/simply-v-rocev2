@@ -1,0 +1,26 @@
+# FPGA and simulation artifacts
+**/.Xil/
+**/*.runs/
+**/*.cache/
+**/ip_user_files/
+*.bit
+*.dcp
+*.ltx
+*.log
+*.jou
+*.wdb
+*.vcd
+
+# Local environments and caches
+**/__pycache__/
+*.pyc
+**/.vagrant/
+**/.venv/
+.DS_Store
+Thumbs.db
+scratch/
+
+# Personal lab notes are not part of this repository
+/RDMA_test_busybox.md
+/RESOCONTO_Fase3_RDMA.md
+/RESUME_KIT_contesto.md

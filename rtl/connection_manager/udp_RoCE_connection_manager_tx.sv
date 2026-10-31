@@ -1,0 +1,444 @@
+`resetall `timescale 1ns / 1ps `default_nettype none
+
+/*
+ * Connection manager over UDP, TX path
+ * L_key, loc base addr and loc psn not really used, as the qp is not receiveing anything other than ACKs
+ * BIG ENDIANESS
+ */
+
+/*
+ * Structure
+ * +---------+-------------+--------------------------+
+ * | OCTETS  |  BIT RANGE  |       Field              |
+ * +---------+-------------+--------------------------+
+ * |   0     |  [0  :0  ]  |  QP_info_valid           |
+ * |   0     |  [3  :1  ]  |  QP_req_type             |
+ * |   0     |  [4  :4  ]  |  QP_ack_valid            |
+ * |   0     |  [7  :5  ]  |  QP_ack_type             |
+ * |   1     |  [15 :8  ]  |  ZERO_PADD               |
+ * | [4:2]   |  [39 :16 ]  |  QP_info_loc_qpn         |
+ * |   5     |  [47 :40 ]  |  ZERO_PADD               |
+ * | [8:6]   |  [71 :48 ]  |  QP_info_loc_psn         |
+ * | [12:9]  |  [103 :72]  |  QP_info_loc_r_key       |
+ * | [20:13] |  [167:104]  |  QP_info_loc_base_addr   |
+ * | [24:21] |  [199:168]  |  QP_info_loc_ip_addr     |
+ * |   25    |  [207:200]  |  ZERO_PADD               |
+ * | [28:26] |  [231:208]  |  QP_info_rem_qpn         |
+ * |   29    |  [239:232]  |  ZERO_PADD               |
+ * | [32:30] |  [263:240]  |  QP_info_rem_psn         |
+ * | [36:33] |  [295:264]  |  QP_info_rem_r_key       |
+ * | [44:37] |  [359:296]  |  QP_info_rem_base_addr   |
+ * | [48:45] |  [391:360]  |  QP_info_rem_ip_addr     |
+ * | [50:49] |  [407:392]  |  QP_info_listening_port  | // relevant only for listener 
+ * +---------+-------------+--------------------------+
+ * |   51    |  [408:408]  |  txmeta_valid            |
+ * |   51    |  [409:409]  |  txmeta_start            |
+ * |   51    |  [410:410]  |  txmeta_is_immediate     |
+ * |   51    |  [411:411]  |  txmeta_tx_type          |
+ * |   51    |  [415:412]  |  txmeta_reserved         |
+ * | [55:52] |  [447:416]  |  txmeta_dma_length       |
+ * | [59:56] |  [479:448]  |  txmeta_n_transfers      |
+ * | [63:60] |  [511:480]  |  txmeta_frequency        |
+ * +---------+-------------+--------------------------+
+ * TOTAL length 512 bits, 64 bytes
+ */
+
+module udp_RoCE_connection_manager_tx #(
+    parameter DATA_WIDTH      = 256,
+    parameter DEST_UDP_PORT   = 16'h4322,
+    parameter LISTEN_UDP_PORT = 16'h4321
+
+) (
+    input wire clk,
+    input wire rst,
+
+    /*
+     * RoCE QP parameters
+     */
+    input wire        s_qp_info_valid,
+    output wire       s_qp_info_ready,
+
+    input wire [2 :0] s_qp_info_req_type,
+    input wire        s_qp_info_ack_valid,
+    input wire [2 :0] s_qp_info_ack_type,
+    input wire [23:0] s_qp_info_loc_qpn,
+    input wire [23:0] s_qp_info_loc_psn,
+    input wire [31:0] s_qp_info_loc_r_key,
+    input wire [31:0] s_qp_info_loc_ip_addr,
+    input wire [63:0] s_qp_info_loc_base_addr,
+    input wire [23:0] s_qp_info_rem_qpn,
+    input wire [23:0] s_qp_info_rem_psn,
+    input wire [31:0] s_qp_info_rem_r_key,
+    input wire [31:0] s_qp_info_rem_ip_addr,
+    input wire [63:0] s_qp_info_rem_base_addr,
+
+    input wire [15:0] s_qp_info_udp_dest_port,
+
+    input wire [15:0] s_udp_dest_port,
+
+    /*
+     * UDP frame output
+     */
+    output wire                     m_udp_hdr_valid,
+    input  wire                     m_udp_hdr_ready,
+    output wire [ 31:0]             m_ip_source_ip,
+    output wire [ 31:0]             m_ip_dest_ip,
+    output wire [ 15:0]             m_udp_source_port,
+    output wire [ 15:0]             m_udp_dest_port,
+    output wire [ 15:0]             m_udp_length,
+    output wire [ 15:0]             m_udp_checksum,
+
+    output wire [DATA_WIDTH-1   : 0] m_udp_payload_axis_tdata,
+    output wire [DATA_WIDTH/8-1 : 0] m_udp_payload_axis_tkeep,
+    output wire                      m_udp_payload_axis_tvalid,
+    input  wire                      m_udp_payload_axis_tready,
+    output wire                      m_udp_payload_axis_tlast,
+    output wire                      m_udp_payload_axis_tuser,
+    /*
+     * Status signals
+     */
+    output wire         busy,
+    /*
+     * Configuration
+     */
+    input wire [15:0] cfg_udp_source_port
+);
+
+    parameter KEEP_ENABLE = 1;
+    parameter KEEP_WIDTH  = DATA_WIDTH/8;
+
+    parameter BYTE_LANES = KEEP_ENABLE ? KEEP_WIDTH : 1;
+
+    parameter QP_INFO_SIZE = 64;
+
+    parameter CYCLE_COUNT = (QP_INFO_SIZE+BYTE_LANES-1)/BYTE_LANES;
+
+    parameter PTR_WIDTH = $clog2(CYCLE_COUNT);
+
+    parameter OFFSET = QP_INFO_SIZE % BYTE_LANES;
+
+    // datapath control signals
+    reg store_qp_info;
+
+    reg send_qp_info_reg = 1'b0, send_qp_info_next;
+    reg [PTR_WIDTH-1:0] ptr_reg = 0, ptr_next;
+
+    reg flush_save;
+    reg transfer_in_save;
+
+    reg        qp_info_valid_reg;
+    reg [2 :0] qp_info_req_type_reg;
+    reg        qp_info_ack_valid_reg;
+    reg [2 :0] qp_info_ack_type_reg;
+
+    reg [23:0] qp_info_loc_qpn_reg;
+    reg [23:0] qp_info_loc_psn_reg;
+    reg [31:0] qp_info_loc_r_key_reg;
+    reg [63:0] qp_info_loc_base_addr_reg;
+    reg [31:0] qp_info_loc_ip_addr_reg;
+
+    reg [23:0] qp_info_rem_qpn_reg;
+    reg [23:0] qp_info_rem_psn_reg;
+    reg [31:0] qp_info_rem_r_key_reg;
+    reg [63:0] qp_info_rem_base_addr_reg;
+    reg [31:0] qp_info_rem_ip_addr_reg;
+
+    reg [15:0] qp_info_udp_dest_port_reg;
+
+    reg [15:0] udp_dest_port_reg;
+
+    reg s_qp_info_ready_reg = 1'b0, s_qp_info_ready_next;
+
+    reg s_qp_info_valid_del;
+
+    reg        m_udp_hdr_valid_reg = 1'b0, m_udp_hdr_valid_next;
+    reg [31:0] m_ip_source_ip_reg = 32'd0;
+    reg [31:0] m_ip_dest_ip_reg = 32'd0;
+    reg [15:0] m_udp_source_port_reg = 16'd0;
+    reg [15:0] m_udp_dest_port_reg = 16'd0;
+    reg [15:0] m_udp_length_reg = 16'd0;
+    reg [15:0] m_udp_checksum_reg = 16'd0;
+
+    reg busy_reg = 1'b0;
+
+    // internal datapath
+    reg  [DATA_WIDTH-1:0] m_udp_payload_axis_tdata_int;
+    reg  [KEEP_WIDTH-1:0] m_udp_payload_axis_tkeep_int;
+    reg                   m_udp_payload_axis_tvalid_int;
+    reg                   m_udp_payload_axis_tready_int_reg = 1'b0;
+    reg                   m_udp_payload_axis_tlast_int;
+    reg                   m_udp_payload_axis_tuser_int;
+    wire                  m_udp_payload_axis_tready_int_early;
+
+    assign s_qp_info_ready = s_qp_info_ready_reg;
+
+    assign m_udp_hdr_valid = m_udp_hdr_valid_reg;
+    assign m_ip_source_ip = m_ip_source_ip_reg;
+    assign m_ip_dest_ip = m_ip_dest_ip_reg;
+    assign m_udp_source_port = m_udp_source_port_reg;
+    assign m_udp_dest_port = m_udp_dest_port_reg;
+    assign m_udp_length = m_udp_length_reg;
+    assign m_udp_checksum = m_udp_checksum_reg;
+
+
+    assign busy = busy_reg;
+
+    always @* begin
+        send_qp_info_next = send_qp_info_reg;
+        ptr_next = ptr_reg;
+
+        s_qp_info_ready_next = 1'b0;
+
+        m_udp_hdr_valid_next = m_udp_hdr_valid_reg && !m_udp_hdr_ready;
+
+        store_qp_info = 1'b0;
+
+        flush_save = 1'b0;
+        transfer_in_save = 1'b0;
+
+        m_udp_payload_axis_tdata_int = {DATA_WIDTH{1'b0}};
+        m_udp_payload_axis_tkeep_int = {KEEP_WIDTH{1'b0}};
+        m_udp_payload_axis_tvalid_int = 1'b0;
+        m_udp_payload_axis_tlast_int = 1'b0;
+        m_udp_payload_axis_tuser_int = 1'b0;
+
+
+        if (s_qp_info_ready && s_qp_info_valid) begin
+            store_qp_info = 1'b1;
+            ptr_next = 0;
+
+            m_udp_hdr_valid_next = 1'b1;
+
+            send_qp_info_next = 1'b1;
+        end
+
+        if (m_udp_payload_axis_tready_int_reg) begin
+
+            if (send_qp_info_reg) begin
+                ptr_next = ptr_reg + 1;
+
+                m_udp_payload_axis_tvalid_int = 1'b1;
+
+            `define _HEADER_FIELD_(offset, field) \
+                if (ptr_reg == offset/BYTE_LANES) begin \
+                    m_udp_payload_axis_tdata_int[(offset%BYTE_LANES)*8 +: 8] = field; \
+                    m_udp_payload_axis_tkeep_int[offset%BYTE_LANES] = 1'b1; \
+                end
+                `_HEADER_FIELD_(0 ,  {qp_info_ack_type_reg, qp_info_ack_valid_reg, qp_info_req_type_reg, qp_info_valid_reg})
+                `_HEADER_FIELD_(1 ,  8'h00)
+                `_HEADER_FIELD_(2 ,  qp_info_loc_qpn_reg[2*8 +: 8])
+                `_HEADER_FIELD_(3 ,  qp_info_loc_qpn_reg[1*8 +: 8])
+                `_HEADER_FIELD_(4 ,  qp_info_loc_qpn_reg[0*8 +: 8])
+                `_HEADER_FIELD_(5 ,  8'h00)
+                `_HEADER_FIELD_(6 ,  qp_info_loc_psn_reg[2*8 +: 8])
+                `_HEADER_FIELD_(7 ,  qp_info_loc_psn_reg[1*8 +: 8])
+                `_HEADER_FIELD_(8 ,  qp_info_loc_psn_reg[0*8 +: 8])
+                `_HEADER_FIELD_(9 ,  qp_info_loc_r_key_reg[3*8 +: 8])
+                `_HEADER_FIELD_(10,  qp_info_loc_r_key_reg[2*8 +: 8])
+                `_HEADER_FIELD_(11,  qp_info_loc_r_key_reg[1*8 +: 8])
+                `_HEADER_FIELD_(12,  qp_info_loc_r_key_reg[0*8 +: 8])
+                `_HEADER_FIELD_(13,  qp_info_loc_base_addr_reg[7*8 +: 8])
+                `_HEADER_FIELD_(14,  qp_info_loc_base_addr_reg[6*8 +: 8])
+                `_HEADER_FIELD_(15,  qp_info_loc_base_addr_reg[5*8 +: 8])
+                `_HEADER_FIELD_(16,  qp_info_loc_base_addr_reg[4*8 +: 8])
+                `_HEADER_FIELD_(17,  qp_info_loc_base_addr_reg[3*8 +: 8])
+                `_HEADER_FIELD_(18,  qp_info_loc_base_addr_reg[2*8 +: 8])
+                `_HEADER_FIELD_(19,  qp_info_loc_base_addr_reg[1*8 +: 8])
+                `_HEADER_FIELD_(20,  qp_info_loc_base_addr_reg[0*8 +: 8])
+                `_HEADER_FIELD_(21,  qp_info_loc_ip_addr_reg[3*8 +: 8])
+                `_HEADER_FIELD_(22,  qp_info_loc_ip_addr_reg[2*8 +: 8])
+                `_HEADER_FIELD_(23,  qp_info_loc_ip_addr_reg[1*8 +: 8])
+                `_HEADER_FIELD_(24,  qp_info_loc_ip_addr_reg[0*8 +: 8])
+                `_HEADER_FIELD_(25 ,  8'h00)
+                `_HEADER_FIELD_(26,  qp_info_rem_qpn_reg[2*8 +: 8])
+                `_HEADER_FIELD_(27,  qp_info_rem_qpn_reg[1*8 +: 8])
+                `_HEADER_FIELD_(28,  qp_info_rem_qpn_reg[0*8 +: 8])
+                `_HEADER_FIELD_(29 ,  8'h00)
+                `_HEADER_FIELD_(30,  qp_info_rem_psn_reg[2*8 +: 8])
+                `_HEADER_FIELD_(31,  qp_info_rem_psn_reg[1*8 +: 8])
+                `_HEADER_FIELD_(32,  qp_info_rem_psn_reg[0*8 +: 8])
+                `_HEADER_FIELD_(33,  qp_info_rem_r_key_reg[3*8 +: 8])
+                `_HEADER_FIELD_(34,  qp_info_rem_r_key_reg[2*8 +: 8])
+                `_HEADER_FIELD_(35,  qp_info_rem_r_key_reg[1*8 +: 8])
+                `_HEADER_FIELD_(36,  qp_info_rem_r_key_reg[0*8 +: 8])
+                `_HEADER_FIELD_(37,  qp_info_rem_base_addr_reg[7*8 +: 8])
+                `_HEADER_FIELD_(38,  qp_info_rem_base_addr_reg[6*8 +: 8])
+                `_HEADER_FIELD_(39,  qp_info_rem_base_addr_reg[5*8 +: 8])
+                `_HEADER_FIELD_(40,  qp_info_rem_base_addr_reg[4*8 +: 8])
+                `_HEADER_FIELD_(41,  qp_info_rem_base_addr_reg[3*8 +: 8])
+                `_HEADER_FIELD_(42,  qp_info_rem_base_addr_reg[2*8 +: 8])
+                `_HEADER_FIELD_(43,  qp_info_rem_base_addr_reg[1*8 +: 8])
+                `_HEADER_FIELD_(44,  qp_info_rem_base_addr_reg[0*8 +: 8])
+                `_HEADER_FIELD_(45,  qp_info_rem_ip_addr_reg[3*8 +: 8])
+                `_HEADER_FIELD_(46,  qp_info_rem_ip_addr_reg[2*8 +: 8])
+                `_HEADER_FIELD_(47,  qp_info_rem_ip_addr_reg[1*8 +: 8])
+                `_HEADER_FIELD_(48,  qp_info_rem_ip_addr_reg[0*8 +: 8])
+                `_HEADER_FIELD_(49,  qp_info_udp_dest_port_reg[1*8 +: 8])
+                `_HEADER_FIELD_(50,  qp_info_udp_dest_port_reg[0*8 +: 8])
+                // not used
+                `_HEADER_FIELD_(51,  8'h00)
+                `_HEADER_FIELD_(52,  8'h00)
+                `_HEADER_FIELD_(53,  8'h00)
+                `_HEADER_FIELD_(54,  8'h00)
+                `_HEADER_FIELD_(55,  8'h00)
+                `_HEADER_FIELD_(56,  8'h00)
+                `_HEADER_FIELD_(57,  8'h00)
+                `_HEADER_FIELD_(58,  8'h00)
+                `_HEADER_FIELD_(59,  8'h00)
+                `_HEADER_FIELD_(60,  8'h00)
+                `_HEADER_FIELD_(61,  8'h00)
+                `_HEADER_FIELD_(62,  8'h00)
+                `_HEADER_FIELD_(63,  8'h00)
+
+                if (ptr_reg == (QP_INFO_SIZE-1)/BYTE_LANES) begin
+                    send_qp_info_next = 1'b0;
+                    m_udp_payload_axis_tlast_int = 1'b1;
+                end
+
+            `undef _HEADER_FIELD_
+        end
+        end
+
+        s_qp_info_ready_next = !m_udp_hdr_valid_next && !(send_qp_info_next);
+    end
+
+    always @(posedge clk) begin
+        send_qp_info_reg <= send_qp_info_next;
+        ptr_reg <= ptr_next;
+
+        s_qp_info_ready_reg <= s_qp_info_ready_next;
+
+        m_udp_hdr_valid_reg <= m_udp_hdr_valid_next;
+
+        busy_reg <= send_qp_info_next;
+
+        s_qp_info_valid_del <= s_qp_info_valid && s_qp_info_ready_reg;
+
+        if (store_qp_info) begin
+            qp_info_valid_reg         <= 1'b1;
+            qp_info_req_type_reg      <= s_qp_info_req_type;
+            qp_info_ack_valid_reg     <= s_qp_info_ack_valid;
+            qp_info_ack_type_reg      <= s_qp_info_ack_type;
+            qp_info_loc_qpn_reg       <= s_qp_info_loc_qpn;
+            qp_info_loc_psn_reg       <= s_qp_info_loc_psn;
+            qp_info_loc_r_key_reg     <= s_qp_info_loc_r_key;
+            qp_info_loc_base_addr_reg <= s_qp_info_loc_base_addr;
+            qp_info_loc_ip_addr_reg   <= s_qp_info_loc_ip_addr;
+
+            qp_info_rem_qpn_reg       <= s_qp_info_rem_qpn;
+            qp_info_rem_psn_reg       <= s_qp_info_rem_psn;
+            qp_info_rem_r_key_reg     <= s_qp_info_rem_r_key;
+            qp_info_rem_base_addr_reg <= s_qp_info_rem_base_addr;
+            qp_info_rem_ip_addr_reg   <= s_qp_info_rem_ip_addr;
+
+            qp_info_udp_dest_port_reg <= LISTEN_UDP_PORT;
+
+            udp_dest_port_reg         <= s_udp_dest_port;
+
+            m_ip_source_ip_reg    <= s_qp_info_loc_ip_addr;
+            m_ip_dest_ip_reg      <= s_qp_info_rem_ip_addr;
+            m_udp_source_port_reg <= cfg_udp_source_port;
+            m_udp_dest_port_reg   <= s_udp_dest_port;
+            m_udp_length_reg      <= QP_INFO_SIZE+16'd8;
+            m_udp_checksum_reg    <= 16'd0;
+        end
+
+        if (rst) begin
+            send_qp_info_reg <= 1'b0;
+            ptr_reg <= 0;
+            s_qp_info_ready_reg <= 1'b0;
+            m_udp_hdr_valid_reg <= 1'b0;
+            busy_reg <= 1'b0;
+        end
+    end
+
+    // output datapath logic
+    reg [DATA_WIDTH-1:0] m_udp_payload_axis_tdata_reg = {DATA_WIDTH{1'b0}};
+    reg [KEEP_WIDTH-1:0] m_udp_payload_axis_tkeep_reg = {KEEP_WIDTH{1'b0}};
+    reg                  m_udp_payload_axis_tvalid_reg = 1'b0, m_udp_payload_axis_tvalid_next;
+    reg                  m_udp_payload_axis_tlast_reg = 1'b0;
+    reg                  m_udp_payload_axis_tuser_reg = 1'b0;
+
+    reg [DATA_WIDTH-1:0] temp_m_udp_payload_axis_tdata_reg = {DATA_WIDTH{1'b0}};
+    reg [KEEP_WIDTH-1:0] temp_m_udp_payload_axis_tkeep_reg = {KEEP_WIDTH{1'b0}};
+    reg                  temp_m_udp_payload_axis_tvalid_reg = 1'b0, temp_m_udp_payload_axis_tvalid_next;
+    reg                  temp_m_udp_payload_axis_tlast_reg = 1'b0;
+    reg                  temp_m_udp_payload_axis_tuser_reg = 1'b0;
+
+    // datapath control
+    reg store_udp_payload_axis_int_to_output;
+    reg store_udp_payload_axis_int_to_temp;
+    reg store_udp_payload_axis_temp_to_output;
+
+    assign m_udp_payload_axis_tdata = m_udp_payload_axis_tdata_reg;
+    assign m_udp_payload_axis_tkeep = KEEP_ENABLE ? m_udp_payload_axis_tkeep_reg : {KEEP_WIDTH{1'b1}};
+    assign m_udp_payload_axis_tvalid = m_udp_payload_axis_tvalid_reg;
+    assign m_udp_payload_axis_tlast =  m_udp_payload_axis_tlast_reg;
+    assign m_udp_payload_axis_tuser =  m_udp_payload_axis_tuser_reg;
+
+    // enable ready input next cycle if output is ready or if both output registers are empty
+    assign m_udp_payload_axis_tready_int_early = m_udp_payload_axis_tready || (!temp_m_udp_payload_axis_tvalid_reg && !m_udp_payload_axis_tvalid_reg);
+
+    always @* begin
+        // transfer sink ready state to source
+        m_udp_payload_axis_tvalid_next = m_udp_payload_axis_tvalid_reg;
+        temp_m_udp_payload_axis_tvalid_next = temp_m_udp_payload_axis_tvalid_reg;
+
+        store_udp_payload_axis_int_to_output = 1'b0;
+        store_udp_payload_axis_int_to_temp = 1'b0;
+        store_udp_payload_axis_temp_to_output = 1'b0;
+
+        if (m_udp_payload_axis_tready_int_reg) begin
+            // input is ready
+            if (m_udp_payload_axis_tready || !m_udp_payload_axis_tvalid_reg) begin
+                // output is ready or currently not valid, transfer data to output
+                m_udp_payload_axis_tvalid_next = m_udp_payload_axis_tvalid_int;
+                store_udp_payload_axis_int_to_output = 1'b1;
+            end else begin
+                // output is not ready, store input in temp
+                temp_m_udp_payload_axis_tvalid_next = m_udp_payload_axis_tvalid_int;
+                store_udp_payload_axis_int_to_temp = 1'b1;
+            end
+        end else if (m_udp_payload_axis_tready) begin
+            // input is not ready, but output is ready
+            m_udp_payload_axis_tvalid_next = temp_m_udp_payload_axis_tvalid_reg;
+            temp_m_udp_payload_axis_tvalid_next = 1'b0;
+            store_udp_payload_axis_temp_to_output = 1'b1;
+        end
+    end
+
+    always @(posedge clk) begin
+        m_udp_payload_axis_tvalid_reg <= m_udp_payload_axis_tvalid_next;
+        m_udp_payload_axis_tready_int_reg <= m_udp_payload_axis_tready_int_early;
+        temp_m_udp_payload_axis_tvalid_reg <= temp_m_udp_payload_axis_tvalid_next;
+
+        // datapath
+        if (store_udp_payload_axis_int_to_output) begin
+            m_udp_payload_axis_tdata_reg <= m_udp_payload_axis_tdata_int;
+            m_udp_payload_axis_tkeep_reg <= m_udp_payload_axis_tkeep_int;
+            m_udp_payload_axis_tlast_reg <= m_udp_payload_axis_tlast_int;
+            m_udp_payload_axis_tuser_reg <= m_udp_payload_axis_tuser_int;
+        end else if (store_udp_payload_axis_temp_to_output) begin
+            m_udp_payload_axis_tdata_reg <= temp_m_udp_payload_axis_tdata_reg;
+            m_udp_payload_axis_tkeep_reg <= temp_m_udp_payload_axis_tkeep_reg;
+            m_udp_payload_axis_tlast_reg <= temp_m_udp_payload_axis_tlast_reg;
+            m_udp_payload_axis_tuser_reg <= temp_m_udp_payload_axis_tuser_reg;
+        end
+
+        if (store_udp_payload_axis_int_to_temp) begin
+            temp_m_udp_payload_axis_tdata_reg <= m_udp_payload_axis_tdata_int;
+            temp_m_udp_payload_axis_tkeep_reg <= m_udp_payload_axis_tkeep_int;
+            temp_m_udp_payload_axis_tlast_reg <= m_udp_payload_axis_tlast_int;
+            temp_m_udp_payload_axis_tuser_reg <= m_udp_payload_axis_tuser_int;
+        end
+
+        if (rst) begin
+            m_udp_payload_axis_tvalid_reg <= 1'b0;
+            m_udp_payload_axis_tready_int_reg <= 1'b0;
+            temp_m_udp_payload_axis_tvalid_reg <= 1'b0;
+        end
+    end
+
+endmodule
+
+`resetall

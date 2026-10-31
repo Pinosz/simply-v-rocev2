@@ -4,7 +4,7 @@ University internship project by **Domenico Coppola**, integrating a RoCEv2 hard
 
 **SystemVerilog · AXI4-Lite · AXI4-Stream · RISC-V · Vivado · 100G Ethernet**
 
-This repository currently contains the project documentation and hardware evidence. The RTL source package is not included in this upload; [source notes](docs/source-notes.md) describe the inspected files and the version differences to reconcile for a reproducible source release.
+This repository includes the supplied RTL, scripts, dependencies and Simply-V source snapshot alongside the project documentation and hardware evidence. The snapshot has not been rebuilt or revalidated for this release; [source notes](docs/source-notes.md) describe the included versions and the items to reconcile before attempting reproduction.
 
 The internship integration and hardware traffic demonstration are documented here. Subsequent transmitter experiments remain work in progress and are outside the scope of this repository and its reported results.
 
@@ -70,6 +70,21 @@ The next steps are a validated responder/ACK path, external data-source selectio
 ## Build and source notes
 
 The lab notes describe U250 work with Vivado **2024.2** and U280 work with **2023.1**. The inspected source snapshot contains different wrapper versions and build-packaging inconsistencies. The [build and test guide](docs/build-and-test.md) records the original workflow; [source notes](docs/source-notes.md) identify the items to reconcile before reproducing it.
+
+### Source layout
+
+| Path | Contents |
+| --- | --- |
+| [`custom_top_wrapper.sv`](custom_top_wrapper.sv) | CSR interface for the modular-stack integration |
+| [`rtl/`](rtl/) | RoCEv2 stack, packet processing, request/data generation and utilities |
+| [`Scripts/`](Scripts/) | Python control and traffic-analysis utilities |
+| [`sim/`](sim/) | Simulation sources, test harness and environment configuration |
+| [`SimplyV/Simply-V/`](SimplyV/Simply-V/) | Supplied Simply-V integration, configuration and build scripts |
+| [`lib/`](lib/) | Supplied Ethernet, AXI and CRC dependency sources |
+| [`example/`](example/) | Upstream FPGA-board examples |
+| [`syn/`](syn/) and [`wireshark_dissectors/`](wireshark_dissectors/) | Synthesis helper and protocol dissector |
+
+The original stack README is retained as [`README.upstream.md`](README.upstream.md). Its UDP connection-manager examples describe the upstream design; this integration uses the CSR flow documented here. Personal lab reports, Git histories and generated artifacts are excluded. Dependencies are included as source directories rather than initialized Git submodules.
 
 ## Credits
 

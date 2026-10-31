@@ -1,0 +1,13 @@
+# Python products
+*__pycache__
+
+# VScode local
+.vscode
+
+# Build outputs
+build*/
+
+# Temporary files and directories
+tmp*
+backup*
+*.log

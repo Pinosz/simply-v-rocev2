@@ -1,0 +1,5 @@
+# Ignore rtl folders for downloaded sources
+*/rtl/*
+
+# Downloaded binaries
+bender
